@@ -1,5 +1,5 @@
 
-name: Build Amoozyar Android APK
+name: Build Amoozyar for All Platforms
 
 on:
   workflow_dispatch:
@@ -11,49 +11,18 @@ permissions:
   contents: read
 
 jobs:
-  build-android:
+
+  # 1. Prepare source and extract original favicon
+  prepare:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Get source code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v4
-        with:
-          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
-
-      - name: Prepare project
+      - name: Extract original favicon
         run: |
-          mkdir -p www assets
-          cp index.html www/index.html
+          mkdir -p assets
 
-          npm init -y
-
-          npm install @capacitor/core@7 @capacitor/android@7
-          npm install --save-dev @capacitor/cli@7 @capacitor/assets
-
-          cat > capacitor.config.json <<'EOF'
-          {
-            "appId": "com.amoozyar.app",
-            "appName": "آموزیار",
-            "webDir": "www"
-          }
-          EOF
-
-      - name: Extract original website icon
-        run: |
           python3 - <<'PY'
           from html.parser import HTMLParser
           from urllib.parse import unquote
@@ -83,7 +52,7 @@ jobs:
           href = parser.icon
 
           if not href or not href.startswith("data:image/svg+xml"):
-              raise SystemExit("Website SVG favicon not found!")
+              raise SystemExit("SVG favicon not found!")
 
           header, data = href.split(",", 1)
 
@@ -93,20 +62,67 @@ jobs:
               svg = unquote(data).encode("utf-8")
 
           if b"<svg" not in svg:
-              raise SystemExit("Extracted icon is not a valid SVG!")
+              raise SystemExit("Invalid SVG!")
 
           with open("assets/logo.svg", "wb") as f:
               f.write(svg)
 
-          print("Original website favicon extracted successfully.")
+          print("Original Amoozyar favicon extracted.")
           PY
 
-      - name: Create Android project
+      - name: Upload source files
+        uses: actions/upload-artifact@v4
+        with:
+          name: amoozyar-source
+          path: |
+            index.html
+            assets/logo.svg
+          retention-days: 1
+
+  # 2. Android APK
+  android:
+    needs: prepare
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: amoozyar-source
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - name: Configure Capacitor
         run: |
+          mkdir -p www
+          cp index.html www/index.html
+
+          npm init -y
+          npm install @capacitor/core@7 @capacitor/android@7
+          npm install --save-dev @capacitor/cli@7 @capacitor/assets
+
+          cat > capacitor.config.json <<'EOF'
+          {
+            "appId": "com.amoozyar.app",
+            "appName": "آموزیار",
+            "webDir": "www"
+          }
+          EOF
+
           npx cap add android
           npx cap sync android
 
-      - name: Generate original app icons
+      - name: Generate app icon
         run: |
           npx @capacitor/assets generate --android \
             --iconBackgroundColor '#0f766e' \
@@ -118,10 +134,239 @@ jobs:
           cd android
           ./gradlew --no-daemon assembleDebug
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: Amoozyar-Android-APK
           path: android/app/build/outputs/apk/debug/app-debug.apk
+
+  # 3. iOS unsigned IPA
+  ios:
+    needs: prepare
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: amoozyar-source
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Configure Capacitor
+        run: |
+          mkdir -p www
+          cp index.html www/index.html
+
+          npm init -y
+          npm install @capacitor/core@7 @capacitor/ios@7
+          npm install --save-dev @capacitor/cli@7 @capacitor/assets
+
+          cat > capacitor.config.json <<'EOF'
+          {
+            "appId": "com.amoozyar.app",
+            "appName": "آموزیار",
+            "webDir": "www"
+          }
+          EOF
+
+          npx cap add ios
+          npx cap sync ios
+
+      - name: Generate iOS icon
+        run: |
+          npx @capacitor/assets generate --ios \
+            --iconBackgroundColor '#0f766e' \
+            --splashBackgroundColor '#0f766e'
+
+      - name: Build unsigned iOS app
+        run: |
+          xcodebuild \
+            -project ios/App/App.xcodeproj \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package unsigned IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/App.app Payload/
+          zip -r Amoozyar-iOS-Unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Amoozyar-iOS-Unsigned-IPA
+          path: Amoozyar-iOS-Unsigned.ipa
+
+  # 4. Windows, Linux and macOS
+  desktop:
+    needs: prepare
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+            target: --win nsis
+            artifact: Amoozyar-Windows-EXE
+            path: dist/*.exe
+
+          - os: ubuntu-24.04
+            platform: linux
+            target: --linux AppImage
+            artifact: Amoozyar-Linux-AppImage
+            path: dist/*.AppImage
+
+          - os: macos-15
+            platform: mac
+            target: --mac dmg
+            artifact: Amoozyar-macOS-DMG
+            path: dist/*.dmg
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: amoozyar-source
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Create desktop project
+        shell: bash
+        run: |
+          cat > package.json <<'EOF'
+          {
+            "name": "amoozyar",
+            "version": "2.1.0",
+            "description": "Amoozyar Learning Platform",
+            "main": "electron.cjs",
+            "author": "Amoozyar",
+            "build": {
+              "appId": "com.amoozyar.app",
+              "productName": "آموزیار",
+              "files": [
+                "index.html",
+                "electron.cjs"
+              ],
+              "directories": {
+                "output": "dist"
+              },
+              "win": {
+                "target": ["nsis"],
+                "icon": "assets/icon.ico"
+              },
+              "linux": {
+                "target": ["AppImage"],
+                "icon": "assets/icon.png"
+              },
+              "mac": {
+                "target": ["dmg"],
+                "icon": "assets/icon.icns"
+              }
+            }
+          }
+          EOF
+
+          cat > electron.cjs <<'EOF'
+          const { app, BrowserWindow } = require('electron');
+          const path = require('path');
+
+          function createWindow() {
+            const win = new BrowserWindow({
+              width: 1280,
+              height: 850,
+              minWidth: 800,
+              minHeight: 600,
+              webPreferences: {
+                contextIsolation: true,
+                nodeIntegration: false
+              }
+            });
+
+            win.loadFile(path.join(__dirname, 'index.html'));
+          }
+
+          app.whenReady().then(() => {
+            createWindow();
+
+            app.on('activate', () => {
+              if (BrowserWindow.getAllWindows().length === 0) {
+                createWindow();
+              }
+            });
+          });
+
+          app.on('window-all-closed', () => {
+            if (process.platform !== 'darwin') app.quit();
+          });
+          EOF
+
+          npm install --save-dev electron electron-builder sharp
+
+      - name: Generate desktop icons
+        shell: bash
+        run: |
+          node - <<'JS'
+          const sharp = require('sharp');
+
+          sharp('assets/logo.svg')
+            .resize(1024, 1024)
+            .png()
+            .toFile('assets/icon.png')
+            .then(() => console.log('PNG icon created.'));
+          JS
+
+          python -m pip install pillow
+
+          python - <<'PY'
+          from PIL import Image
+          import os
+
+          image = Image.open("assets/icon.png").convert("RGBA")
+
+          if os.environ["RUNNER_OS"] == "Windows":
+              image.save(
+                  "assets/icon.ico",
+                  format="ICO",
+                  sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)]
+              )
+
+          if os.environ["RUNNER_OS"] == "macOS":
+              os.makedirs("assets/icon.iconset", exist_ok=True)
+
+              sizes = [16, 32, 64, 128, 256, 512, 1024]
+
+              for size in sizes:
+                  resized = image.resize((size, size))
+                  if size <= 512:
+                      resized.save(
+                          f"assets/icon.iconset/icon_{size}x{size}.png"
+                      )
+                  if size <= 512:
+                      resized.save(
+                          f"assets/icon.iconset/icon_{size}x{size}@2x.png"
+                      )
+          PY
+
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            iconutil -c icns assets/icon.iconset -o assets/icon.icns
+          fi
+
+      - name: Build desktop application
+        shell: bash
+        run: |
+          npx electron-builder ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.path }}
           if-no-files-found: error
           retention-days: 30
