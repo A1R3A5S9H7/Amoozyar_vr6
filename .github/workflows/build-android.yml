@@ -36,26 +36,81 @@ jobs:
 
       - name: Prepare project
         run: |
-          mkdir -p www
+          mkdir -p www assets
           cp index.html www/index.html
 
           npm init -y
 
           npm install @capacitor/core@7 @capacitor/android@7
-          npm install --save-dev @capacitor/cli@7
+          npm install --save-dev @capacitor/cli@7 @capacitor/assets
 
           cat > capacitor.config.json <<'EOF'
           {
             "appId": "com.amoozyar.app",
-            "appName": "Amoozyar",
+            "appName": "آموزیار",
             "webDir": "www"
           }
           EOF
+
+      - name: Extract original website icon
+        run: |
+          python3 - <<'PY'
+          from html.parser import HTMLParser
+          from urllib.parse import unquote
+          import base64
+
+          class IconParser(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.icon = None
+
+              def handle_starttag(self, tag, attrs):
+                  if tag.lower() != "link":
+                      return
+
+                  attrs = dict(attrs)
+                  rel = (attrs.get("rel") or "").lower().split()
+
+                  if "icon" in rel:
+                      self.icon = attrs.get("href")
+
+          with open("index.html", encoding="utf-8") as f:
+              html = f.read()
+
+          parser = IconParser()
+          parser.feed(html)
+
+          href = parser.icon
+
+          if not href or not href.startswith("data:image/svg+xml"):
+              raise SystemExit("Website SVG favicon not found!")
+
+          header, data = href.split(",", 1)
+
+          if ";base64" in header:
+              svg = base64.b64decode(data)
+          else:
+              svg = unquote(data).encode("utf-8")
+
+          if b"<svg" not in svg:
+              raise SystemExit("Extracted icon is not a valid SVG!")
+
+          with open("assets/logo.svg", "wb") as f:
+              f.write(svg)
+
+          print("Original website favicon extracted successfully.")
+          PY
 
       - name: Create Android project
         run: |
           npx cap add android
           npx cap sync android
+
+      - name: Generate original app icons
+        run: |
+          npx @capacitor/assets generate --android \
+            --iconBackgroundColor '#0f766e' \
+            --splashBackgroundColor '#0f766e'
 
       - name: Build APK
         run: |
