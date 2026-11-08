@@ -12,7 +12,7 @@ permissions:
 
 jobs:
 
-  # 1. Prepare source and extract original favicon
+  # 1. Prepare source files
   prepare:
     runs-on: ubuntu-24.04
 
@@ -67,7 +67,7 @@ jobs:
           with open("assets/logo.svg", "wb") as f:
               f.write(svg)
 
-          print("Original Amoozyar favicon extracted.")
+          print("Original favicon extracted successfully.")
           PY
 
       - name: Upload source files
@@ -122,7 +122,7 @@ jobs:
           npx cap add android
           npx cap sync android
 
-      - name: Generate app icon
+      - name: Generate Android icons
         run: |
           npx @capacitor/assets generate --android \
             --iconBackgroundColor '#0f766e' \
@@ -138,6 +138,8 @@ jobs:
         with:
           name: Amoozyar-Android-APK
           path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
 
   # 3. iOS unsigned IPA
   ios:
@@ -173,19 +175,26 @@ jobs:
           npx cap add ios
           npx cap sync ios
 
-      - name: Generate iOS icon
+      - name: Generate iOS icons
         run: |
           npx @capacitor/assets generate --ios \
             --iconBackgroundColor '#0f766e' \
             --splashBackgroundColor '#0f766e'
 
+      - name: Install iOS dependencies
+        run: |
+          cd ios/App
+          pod install
+          cd ../..
+
       - name: Build unsigned iOS app
         run: |
           xcodebuild \
-            -project ios/App/App.xcodeproj \
+            -workspace ios/App/App.xcworkspace \
             -scheme App \
             -configuration Release \
             -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
             build
@@ -193,13 +202,18 @@ jobs:
       - name: Package unsigned IPA
         run: |
           mkdir -p Payload
+
           cp -R build/Build/Products/Release-iphoneos/App.app Payload/
+
+          cd Payload/..
           zip -r Amoozyar-iOS-Unsigned.ipa Payload
 
       - uses: actions/upload-artifact@v4
         with:
           name: Amoozyar-iOS-Unsigned-IPA
           path: Amoozyar-iOS-Unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
 
   # 4. Windows, Linux and macOS
   desktop:
@@ -210,19 +224,16 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            platform: windows
             target: --win nsis
             artifact: Amoozyar-Windows-EXE
             path: dist/*.exe
 
           - os: ubuntu-24.04
-            platform: linux
             target: --linux AppImage
             artifact: Amoozyar-Linux-AppImage
             path: dist/*.AppImage
 
           - os: macos-15
-            platform: mac
             target: --mac dmg
             artifact: Amoozyar-macOS-DMG
             path: dist/*.dmg
@@ -323,9 +334,15 @@ jobs:
             .then(() => console.log('PNG icon created.'));
           JS
 
-          python -m pip install pillow
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            PYTHON=python
+          else
+            PYTHON=python3
+          fi
 
-          python - <<'PY'
+          $PYTHON -m pip install --break-system-packages pillow
+
+          $PYTHON - <<'PY'
           from PIL import Image
           import os
 
@@ -335,24 +352,38 @@ jobs:
               image.save(
                   "assets/icon.ico",
                   format="ICO",
-                  sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)]
+                  sizes=[
+                      (16,16),
+                      (32,32),
+                      (48,48),
+                      (64,64),
+                      (128,128),
+                      (256,256)
+                  ]
               )
 
           if os.environ["RUNNER_OS"] == "macOS":
               os.makedirs("assets/icon.iconset", exist_ok=True)
 
-              sizes = [16, 32, 64, 128, 256, 512, 1024]
+              sizes = [
+                  (16, 16), (16, 32),
+                  (32, 32), (32, 64),
+                  (128, 128), (128, 256),
+                  (256, 256), (256, 512),
+                  (512, 512), (512, 1024)
+              ]
 
-              for size in sizes:
-                  resized = image.resize((size, size))
-                  if size <= 512:
-                      resized.save(
-                          f"assets/icon.iconset/icon_{size}x{size}.png"
-                      )
-                  if size <= 512:
-                      resized.save(
-                          f"assets/icon.iconset/icon_{size}x{size}@2x.png"
-                      )
+              for base, actual in sizes:
+                  resized = image.resize(
+                      (actual, actual),
+                      Image.Resampling.LANCZOS
+                  )
+
+                  suffix = "@2x" if actual == base * 2 else ""
+
+                  resized.save(
+                      f"assets/icon.iconset/icon_{base}x{base}{suffix}.png"
+                  )
           PY
 
           if [ "$RUNNER_OS" = "macOS" ]; then
